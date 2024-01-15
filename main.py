@@ -3,62 +3,72 @@ import numpy as np
 from numpy.ctypeslib import ndpointer
 import os
 import logging
+import configparser
+import threading
+import queue
 
-# Configure basic logging
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+config = configparser.ConfigParser()
+config.read('settings.ini')
+
+log_file = config.get('Logging', 'LogFile', fallback='app.log')
+log_level = config.get('Logging', 'Level', fallback='INFO')
+logging.basicConfig(filename=log_file, level=log_level, format='%(asctime)s - %(levelname)s - %(message)s')
 
 class RustEnhancerError(Exception):
-    """Custom exception for errors related to Rust Enhancer operations."""
     pass
 
 class RustLibraryNotFound(Exception):
-    """Exception when the Rust library is not found."""
     pass
 
 def load_rust_library(lib_path: str) -> ctypes.CDLL:
-    """
-    Dynamically load the Rust shared library from the specified path.
-    """
     if not os.path.exists(lib_path):
         raise RustLibraryNotFound(f"Rust library not found at {lib_path}")
     logging.info("Rust library loaded successfully.")
     return ctypes.CDLL(lib_path)
 
 def setup_rust_functions(rust_lib):
-    """
-    Set up the argument and return types for the Rust functions.
-    """
     rust_lib.enhance_data.argtypes = (ndpointer(ctypes.c_float, flags="C_CONTIGUOUS"), ctypes.c_size_t, ctypes.c_uint)
     rust_lib.enhance_data.restype = ctypes.POINTER(ctypes.c_float)
-
     rust_lib.free_enhanced_data.argtypes = (ctypes.POINTER(ctypes.c_float), ctypes.c_size_t)
     rust_lib.free_enhanced_data.restype = None
 
 class RustEnhancer:
-    def __init__(self, rust_lib):
+    def __init__(self, rust_lib, operation=1):
         self.rust_lib = rust_lib
+        self.operation = operation
+        self.data_queue = queue.Queue()
+        self.result_queue = queue.Queue()
+        self.worker_thread = threading.Thread(target=self.process_data, daemon=True)
+        self.worker_thread.start()
 
-    def enhance_data(self, data: np.ndarray, operation: int) -> np.ndarray:
-        """
-        Enhance the given numpy array data using the specified operation in the Rust library.
-        """
+    def enhance_data(self, data: np.ndarray):
+        self.data_queue.put(data)
+
+    def get_result(self) -> np.ndarray:
+        return self.result_queue.get()
+
+    def process_data(self):
+        while True:
+            data = self.data_queue.get()
+            if data is None:
+                break
+            enhanced_data = self.enhance_data_internal(data)
+            self.result_queue.put(enhanced_data)
+
+    def enhance_data_internal(self, data: np.ndarray) -> np.ndarray:
         self.validate_data(data)
-
         len_data = data.size
-        result_ptr = self.rust_lib.enhance_data(data, len_data, operation)
+        result_ptr = self.rust_lib.enhance_data(data, len_data, self.operation)
         if not result_ptr:
             raise RustEnhancerError("Rust function `enhance_data` failed to allocate memory.")
-
         return self.copy_result_data(result_ptr, len_data)
 
     @staticmethod
     def validate_data(data: np.ndarray):
         if not isinstance(data, np.ndarray):
             raise ValueError("Data must be a numpy array")
-
         if data.ndim > 1:
             data = data.flatten()
-
         if data.dtype != np.float32:
             try:
                 data = data.astype(np.float32)
@@ -69,7 +79,7 @@ class RustEnhancer:
     def copy_result_data(result_ptr, len_data):
         try:
             result = np.ctypeslib.as_array(result_ptr, shape=(len_data,))
-            result_copy = np.array(result)  # Copy the data to a new numpy array
+            result_copy = np.array(result)
         finally:
             rust_lib.free_enhanced_data(result_ptr, len_data)
         return result_copy
@@ -78,6 +88,8 @@ class RustEnhancer:
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb):
+        self.data_queue.put(None)
+        self.worker_thread.join()
         logging.info("Rust Enhancer resources are being cleaned up.")
 
 # Unit tests for RustEnhancer
@@ -122,5 +134,5 @@ if __name__ == "__main__":
         print(f'Library loading error: {e}')
     except Exception as e:
         print(f'Unexpected error: {e}')
-        
+
     unittest.main()
