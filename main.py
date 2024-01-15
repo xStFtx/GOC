@@ -1,38 +1,52 @@
 import ctypes
-from numpy.ctypeslib import ndpointer
 import numpy as np
+from numpy.ctypeslib import ndpointer
 
-# Define a custom exception for our library-related errors
 class RustEnhancerError(Exception):
     pass
 
-# Define a wrapper function for the Rust `enhance_data` function
-def enhance_data(data):
+# Define the Rust function signatures
+def setup_rust_functions():
+    rust_lib.enhance_data.argtypes = (ctypes.POINTER(ctypes.c_float), ctypes.c_size_t, ctypes.c_uint)
+    rust_lib.enhance_data.restype = ctypes.POINTER(ctypes.c_float)
+
+    rust_lib.free_enhanced_data.argtypes = (ctypes.POINTER(ctypes.c_float), ctypes.c_size_t)
+    rust_lib.free_enhanced_data.restype = None
+
+# Wrapper function for the Rust `enhance_data` function
+def enhance_data(data, operation):
     if not isinstance(data, np.ndarray) or data.dtype != np.float32:
         raise ValueError("Data must be a numpy array of type float32")
 
     data_p = data.ctypes.data_as(ctypes.POINTER(ctypes.c_float))
-    result = rust_lib.enhance_data(data_p, len(data))
-    if result == -1:  # Assuming -1 is the error code from Rust
-        raise RustEnhancerError("Rust function `enhance_data` failed.")
-    return result
+    len_data = len(data)
 
-# Attempt to load the shared library
+    result_ptr = rust_lib.enhance_data(data_p, len_data, operation)
+    if not result_ptr:
+        raise RustEnhancerError("Rust function `enhance_data` failed to allocate memory.")
+
+    # Convert the result back to a numpy array
+    result = np.ctypeslib.as_array(result_ptr, shape=(len_data,))
+    # Copy the data to a new numpy array, as the memory will be freed
+    result_copy = np.array(result)
+
+    # Free the memory allocated by Rust
+    rust_lib.free_enhanced_data(result_ptr, len_data)
+
+    return result_copy
+
 try:
-    rust_lib = ctypes.CDLL('../../Framework/lib/rust_enhancer.dll')
-    rust_lib.enhance_data.argtypes = (ctypes.POINTER(ctypes.c_float), ctypes.c_size_t)
-    rust_lib.enhance_data.restype = ctypes.c_float
-    rust_lib.enhance_data.errcheck = lambda result, func, arguments: (
-        RustEnhancerError("Rust function `enhance_data` failed.") if int(result) == -1 else result
-    )
+    rust_lib = ctypes.CDLL('./rust_enhancer.dll')
+    setup_rust_functions()
 except OSError as e:
     raise RustEnhancerError(f"Could not load the shared library: {e}")
 
 # Prepare data
 data = np.array([1.0, 2.0, 3.0], dtype=np.float32)
+operation = 1  # Choose the operation (1: scale, 2: normalize, 3: apply model)
 
 try:
-    result = enhance_data(data)
+    result = enhance_data(data, operation)
     print(f'Result: {result}')
 except RustEnhancerError as e:
     print(f'An error occurred: {e}')
