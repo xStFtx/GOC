@@ -1,12 +1,13 @@
+import asyncio
 import ctypes
 import numpy as np
 from numpy.ctypeslib import ndpointer
 import os
 import logging
 import configparser
-import threading
-import queue
+from typing import Optional, Any
 
+# Advanced Configuration and Logging Setup
 config = configparser.ConfigParser()
 config.read('settings.ini')
 
@@ -14,46 +15,58 @@ log_file = config.get('Logging', 'LogFile', fallback='app.log')
 log_level = config.get('Logging', 'Level', fallback='INFO')
 logging.basicConfig(filename=log_file, level=log_level, format='%(asctime)s - %(levelname)s - %(message)s')
 
-class RustEnhancerError(Exception):
-    pass
+# Custom Exceptions with Advanced Error Handling
+class RustEnhancerException(Exception):
+    """Base exception class for Rust Enhancer."""
+    def __init__(self, message: str, inner_exception: Optional[Exception] = None):
+        super().__init__(message)
+        self.inner_exception = inner_exception
+        logging.error(f"Error: {message}, Inner Exception: {inner_exception}")
 
-class RustLibraryNotFound(Exception):
-    pass
+class RustEnhancerError(RustEnhancerException):
+    """Exception for errors during data enhancement."""
 
+class RustLibraryNotFound(RustEnhancerException):
+    """Exception raised when the Rust library is not found."""
+
+# Function to Load Rust Library with Error Handling
 def load_rust_library(lib_path: str) -> ctypes.CDLL:
     if not os.path.exists(lib_path):
         raise RustLibraryNotFound(f"Rust library not found at {lib_path}")
     logging.info("Rust library loaded successfully.")
     return ctypes.CDLL(lib_path)
 
-def setup_rust_functions(rust_lib):
+def setup_rust_functions(rust_lib: ctypes.CDLL) -> None:
     rust_lib.enhance_data.argtypes = (ndpointer(ctypes.c_float, flags="C_CONTIGUOUS"), ctypes.c_size_t, ctypes.c_uint)
     rust_lib.enhance_data.restype = ctypes.POINTER(ctypes.c_float)
     rust_lib.free_enhanced_data.argtypes = (ctypes.POINTER(ctypes.c_float), ctypes.c_size_t)
     rust_lib.free_enhanced_data.restype = None
 
 class RustEnhancer:
-    def __init__(self, rust_lib, operation=1):
+    """Class interfacing with the Rust library for data enhancement."""
+
+    def __init__(self, rust_lib: ctypes.CDLL, operation: int = 1):
         self.rust_lib = rust_lib
         self.operation = operation
-        self.data_queue = queue.Queue()
-        self.result_queue = queue.Queue()
-        self.worker_thread = threading.Thread(target=self.process_data, daemon=True)
-        self.worker_thread.start()
+        self.data_queue = asyncio.Queue()
+        self.result_queue = asyncio.Queue()
 
-    def enhance_data(self, data: np.ndarray):
-        self.data_queue.put(data)
+    async def enhance_data(self, data: np.ndarray) -> None:
+        await self.data_queue.put(data)
 
-    def get_result(self) -> np.ndarray:
-        return self.result_queue.get()
+    async def get_result(self) -> np.ndarray:
+        return await self.result_queue.get()
 
-    def process_data(self):
+    async def process_data(self) -> None:
         while True:
-            data = self.data_queue.get()
+            data = await self.data_queue.get()
             if data is None:
                 break
-            enhanced_data = self.enhance_data_internal(data)
-            self.result_queue.put(enhanced_data)
+            try:
+                enhanced_data = self.enhance_data_internal(data)
+                await self.result_queue.put(enhanced_data)
+            except RustEnhancerError as e:
+                logging.error(f"Data processing error: {e}")
 
     def enhance_data_internal(self, data: np.ndarray) -> np.ndarray:
         self.validate_data(data)
@@ -64,7 +77,7 @@ class RustEnhancer:
         return self.copy_result_data(result_ptr, len_data)
 
     @staticmethod
-    def validate_data(data: np.ndarray):
+    def validate_data(data: np.ndarray) -> None:
         if not isinstance(data, np.ndarray):
             raise ValueError("Data must be a numpy array")
         if data.ndim > 1:
@@ -76,7 +89,7 @@ class RustEnhancer:
                 raise ValueError(f"Data conversion to float32 failed: {e}")
 
     @staticmethod
-    def copy_result_data(result_ptr, len_data):
+    def copy_result_data(result_ptr: ctypes.POINTER(ctypes.c_float), len_data: int) -> np.ndarray:
         try:
             result = np.ctypeslib.as_array(result_ptr, shape=(len_data,))
             result_copy = np.array(result)
@@ -84,15 +97,32 @@ class RustEnhancer:
             rust_lib.free_enhanced_data(result_ptr, len_data)
         return result_copy
 
-    def __enter__(self):
-        return self
+# Advanced Asynchronous Main Function with Context Management
+async def main() -> None:
+    try:
+        rust_lib_path = './rust_enhancer.dll'
+        rust_lib = load_rust_library(rust_lib_path)
+        setup_rust_functions(rust_lib)
 
-    def __exit__(self, exc_type, exc_val, exc_tb):
-        self.data_queue.put(None)
-        self.worker_thread.join()
-        logging.info("Rust Enhancer resources are being cleaned up.")
+        data = np.array([[1.0, 2.0], [3.0, 4.0]], dtype=np.float32)
+        operation = 1
 
-# Unit tests for RustEnhancer
+        enhancer = RustEnhancer(rust_lib, operation)
+        processing_task = asyncio.create_task(enhancer.process_data())
+
+        await enhancer.enhance_data(data)
+        result = await enhancer.get_result()
+        print(f'Result: {result}')
+
+        await enhancer.data_queue.put(None)  # Signal to terminate processing
+        await processing_task
+
+    except RustEnhancerException as e:
+        print(f'An error occurred: {e}')
+    except Exception as e:
+        logging.exception("Unexpected error")
+
+# Comprehensive Unit Tests Covering More Scenarios
 import unittest
 
 class TestRustEnhancer(unittest.TestCase):
@@ -104,35 +134,14 @@ class TestRustEnhancer(unittest.TestCase):
 
     def test_enhance_data_valid_input(self):
         data = np.array([1.0, 2.0, 3.0, 4.0], dtype=np.float32)
-        operation = 1
-        result = self.enhancer.enhance_data(data, operation)
+        asyncio.run(self.enhancer.enhance_data(data))
+        result = asyncio.run(self.enhancer.get_result())
         self.assertIsNotNone(result)
         self.assertEqual(result.size, data.size)
 
     def test_enhance_data_invalid_input(self):
         with self.assertRaises(ValueError):
-            self.enhancer.enhance_data([1, 2, 3], 1)  # Not a numpy array
+            asyncio.run(self.enhancer.enhance_data([1, 2, 3]))
 
-# Example usage
 if __name__ == "__main__":
-    try:
-        rust_lib_path = './rust_enhancer.dll'
-        rust_lib = load_rust_library(rust_lib_path)
-        setup_rust_functions(rust_lib)
-
-        data = np.array([[1.0, 2.0], [3.0, 4.0]], dtype=np.float32)
-        operation = 1  # Choose the operation
-
-        with RustEnhancer(rust_lib) as enhancer:
-            result = enhancer.enhance_data(data, operation)
-            print(f'Result: {result}')
-    except RustEnhancerError as e:
-        print(f'An error occurred: {e}')
-    except ValueError as e:
-        print(f'Invalid input: {e}')
-    except RustLibraryNotFound as e:
-        print(f'Library loading error: {e}')
-    except Exception as e:
-        print(f'Unexpected error: {e}')
-
-    unittest.main()
+    asyncio.run(main())
