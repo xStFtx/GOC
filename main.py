@@ -6,8 +6,9 @@ import os
 import logging
 import configparser
 from typing import Optional, Any, Union
-import os
 import contextlib
+import time
+import sys
 
 # Enhanced Configuration and Logging Setup
 config = configparser.ConfigParser()
@@ -15,15 +16,21 @@ config.read(os.getenv('SETTINGS_INI', 'settings.ini'))
 
 log_file = os.getenv('LOG_FILE', config.get('Logging', 'LogFile', fallback='app.log'))
 log_level = os.getenv('LOG_LEVEL', config.get('Logging', 'Level', fallback='INFO').upper())
-logging.basicConfig(filename=log_file, level=log_level, format='%(asctime)s - %(levelname)s - %(message)s')
+
+logging.basicConfig(
+    filename=log_file, 
+    level=log_level, 
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
+
+logger = logging.getLogger(__name__)
 
 # Custom Exceptions with Advanced Error Handling
 class RustEnhancerException(Exception):
     """Base exception class for Rust Enhancer."""
     def __init__(self, message: str, inner_exception: Optional[Exception] = None):
         super().__init__(message)
-        self.inner_exception = inner_exception
-        logging.error(f"Error: {message}, Inner Exception: {inner_exception}")
+        logger.error(f"Error: {message}, Inner Exception: {inner_exception}")
 
 class RustEnhancerError(RustEnhancerException):
     """Exception for errors during data enhancement."""
@@ -35,7 +42,7 @@ class RustLibraryNotFound(RustEnhancerException):
 def load_rust_library(lib_path: str) -> ctypes.CDLL:
     if not os.path.exists(lib_path):
         raise RustLibraryNotFound(f"Rust library not found at {lib_path}")
-    logging.info("Rust library loaded successfully.")
+    logger.info("Rust library loaded successfully.")
     return ctypes.CDLL(lib_path)
 
 def setup_rust_functions(rust_lib: ctypes.CDLL) -> None:
@@ -68,7 +75,7 @@ class RustEnhancer:
                 enhanced_data = self.enhance_data_internal(data)
                 await self.result_queue.put(enhanced_data)
             except RustEnhancerError as e:
-                logging.error(f"Data processing error: {e}")
+                logger.error(f"Data processing error: {e}")
 
     def enhance_data_internal(self, data: np.ndarray) -> np.ndarray:
         self.validate_data(data)
@@ -101,6 +108,7 @@ class RustEnhancer:
 
 # Advanced Asynchronous Main Function with Context Management
 async def main() -> None:
+    start_time = time.time()
     try:
         rust_lib_path = os.getenv('RUST_LIB_PATH', './rust_enhancer.dll')
         with RustLibraryContext(rust_lib_path) as rust_lib:
@@ -120,7 +128,10 @@ async def main() -> None:
     except RustEnhancerException as e:
         print(f'An error occurred: {e}')
     except Exception as e:
-        logging.exception("Unexpected error")
+        logger.exception("Unexpected error")
+    finally:
+        elapsed_time = time.time() - start_time
+        logger.info(f"Execution time: {elapsed_time} seconds")
 
 # Context Manager for Rust Library
 @contextlib.asynccontextmanager
