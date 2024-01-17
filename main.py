@@ -5,14 +5,16 @@ from numpy.ctypeslib import ndpointer
 import os
 import logging
 import configparser
-from typing import Optional, Any
+from typing import Optional, Any, Union
+import os
+import contextlib
 
-# Advanced Configuration and Logging Setup
+# Enhanced Configuration and Logging Setup
 config = configparser.ConfigParser()
-config.read('settings.ini')
+config.read(os.getenv('SETTINGS_INI', 'settings.ini'))
 
-log_file = config.get('Logging', 'LogFile', fallback='app.log')
-log_level = config.get('Logging', 'Level', fallback='INFO')
+log_file = os.getenv('LOG_FILE', config.get('Logging', 'LogFile', fallback='app.log'))
+log_level = os.getenv('LOG_LEVEL', config.get('Logging', 'Level', fallback='INFO').upper())
 logging.basicConfig(filename=log_file, level=log_level, format='%(asctime)s - %(levelname)s - %(message)s')
 
 # Custom Exceptions with Advanced Error Handling
@@ -77,7 +79,7 @@ class RustEnhancer:
         return self.copy_result_data(result_ptr, len_data)
 
     @staticmethod
-    def validate_data(data: np.ndarray) -> None:
+    def validate_data(data: Union[np.ndarray, Any]) -> None:
         if not isinstance(data, np.ndarray):
             raise ValueError("Data must be a numpy array")
         if data.ndim > 1:
@@ -100,34 +102,43 @@ class RustEnhancer:
 # Advanced Asynchronous Main Function with Context Management
 async def main() -> None:
     try:
-        rust_lib_path = './rust_enhancer.dll'
-        rust_lib = load_rust_library(rust_lib_path)
-        setup_rust_functions(rust_lib)
+        rust_lib_path = os.getenv('RUST_LIB_PATH', './rust_enhancer.dll')
+        with RustLibraryContext(rust_lib_path) as rust_lib:
+            data = np.array([[1.0, 2.0], [3.0, 4.0]], dtype=np.float32)
+            operation = 1
 
-        data = np.array([[1.0, 2.0], [3.0, 4.0]], dtype=np.float32)
-        operation = 1
+            enhancer = RustEnhancer(rust_lib, operation)
+            processing_task = asyncio.create_task(enhancer.process_data())
 
-        enhancer = RustEnhancer(rust_lib, operation)
-        processing_task = asyncio.create_task(enhancer.process_data())
+            await enhancer.enhance_data(data)
+            result = await enhancer.get_result()
+            print(f'Result: {result}')
 
-        await enhancer.enhance_data(data)
-        result = await enhancer.get_result()
-        print(f'Result: {result}')
-
-        await enhancer.data_queue.put(None)  # Signal to terminate processing
-        await processing_task
+            await enhancer.data_queue.put(None)  # Signal to terminate processing
+            await processing_task
 
     except RustEnhancerException as e:
         print(f'An error occurred: {e}')
     except Exception as e:
         logging.exception("Unexpected error")
 
+# Context Manager for Rust Library
+@contextlib.asynccontextmanager
+async def RustLibraryContext(lib_path: str) -> ctypes.CDLL:
+    try:
+        rust_lib = load_rust_library(lib_path)
+        setup_rust_functions(rust_lib)
+        yield rust_lib
+    finally:
+        # Add any necessary cleanup actions
+        pass
+
 # Comprehensive Unit Tests Covering More Scenarios
 import unittest
 
 class TestRustEnhancer(unittest.TestCase):
     def setUp(self):
-        self.rust_lib_path = './rust_enhancer.dll'
+        self.rust_lib_path = os.getenv('RUST_LIB_PATH', './rust_enhancer.dll')
         self.rust_lib = load_rust_library(self.rust_lib_path)
         setup_rust_functions(self.rust_lib)
         self.enhancer = RustEnhancer(self.rust_lib)
